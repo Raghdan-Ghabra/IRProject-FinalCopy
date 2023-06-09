@@ -1,0 +1,234 @@
+import tkinter as tk
+from tkinter import messagebox
+from tkinter import filedialog
+import re
+import string
+import requests
+from collections import defaultdict
+from nltk.tokenize import word_tokenize
+from nltk.corpus import stopwords
+from nltk.stem import PorterStemmer
+from bs4 import BeautifulSoup, FeatureNotFound
+
+
+class EvaluationMetrics:
+    def __init__(self):
+        self.relevant_documents = {}  # Relevant documents for each query
+        self.precision_at_10 = 0.0
+        self.recall = 0.0
+        self.map = 0.0
+        self.mrr = 0.0
+
+    def calculate_metrics(self, relevant_docs, retrieved_docs):
+        self.calculate_precision_at_10(relevant_docs, retrieved_docs)
+        self.calculate_recall(relevant_docs, retrieved_docs)
+        self.calculate_map(relevant_docs, retrieved_docs)
+        self.calculate_mrr(relevant_docs, retrieved_docs)
+
+    def calculate_precision_at_10(self, relevant_docs, retrieved_docs):
+        top_10_retrieved = retrieved_docs[:10]
+        relevant_count = sum(1 for doc in top_10_retrieved if doc in relevant_docs)
+        self.precision_at_10 = relevant_count / 10 if len(top_10_retrieved) > 0 else 0.0
+
+    def calculate_recall(self, relevant_docs, retrieved_docs):
+        retrieved_count = len(retrieved_docs)
+        relevant_count = sum(1 for doc in retrieved_docs if doc in relevant_docs)
+        self.recall = relevant_count / retrieved_count if retrieved_count > 0 else 0.0
+
+    def calculate_map(self, relevant_docs, retrieved_docs):
+        ap_sum = 0.0
+        relevant_count = sum(1 for doc in retrieved_docs if doc in relevant_docs)
+        retrieved_so_far = 0
+
+        for i, doc in enumerate(retrieved_docs):
+            if doc in relevant_docs:
+                retrieved_so_far += 1
+                precision = retrieved_so_far / (i + 1)
+                ap_sum += precision
+
+        self.map = ap_sum / relevant_count if relevant_count > 0 else 0.0
+
+    def calculate_mrr(self, relevant_docs, retrieved_docs):
+        for i, doc in enumerate(retrieved_docs):
+            if doc in relevant_docs:
+                self.mrr = 1.0 / (i + 1)
+                break
+
+
+def crawl_web_pages(urls, limit=100):
+    documents = []
+
+    for url in urls:
+        response = requests.get(url)
+        if response.status_code == 200:
+            page_content = response.text
+
+            try:
+                # Remove HTML tags from the page content
+                soup = BeautifulSoup(page_content, 'lxml')
+                cleaned_content = soup.get_text()
+
+                documents.append(cleaned_content)
+
+                # Break the loop after reaching the limit
+                if len(documents) >= limit:
+                    break
+            except FeatureNotFound:
+                messagebox.showwarning("HTML Parser Error",
+                                       "Failed to parse HTML. Please make sure the 'lxml' library is installed.")
+                break
+        else:
+            messagebox.showwarning("Page Retrieval Error", f"Failed to retrieve the page at URL: {url}")
+
+    return documents
+
+
+def create_inverted_index(documents):
+    inverted_index = defaultdict(list)
+    stemmer = PorterStemmer()
+    stop_words = set(stopwords.words('english'))
+    punctuation_marks = set(string.punctuation)
+
+    line_count = 1
+    for doc_content in documents:
+        # Remove numbers from the document content
+        doc_content = re.sub(r'\d+', '', doc_content)
+
+        # Remove punctuation marks from the document content
+        doc_content = ''.join(char for char in doc_content if char not in punctuation_marks)
+
+        # Tokenize the document content
+        tokens = word_tokenize(doc_content.lower())
+
+        # Remove stopwords, perform normalization, and apply stemming
+        terms = [stemmer.stem(token) for token in tokens if token not in stop_words]
+
+        # Update inverted index
+        for term in terms:
+            inverted_index[term].append((line_count, doc_content))
+
+        line_count += 1
+
+    return dict(inverted_index)
+
+
+def process_query(query, inverted_index):
+    stemmer = PorterStemmer()
+    stop_words = set(stopwords.words('english'))
+    punctuation_marks = set(string.punctuation)
+
+    # Remove punctuation marks from the query
+    query = ''.join(char for char in query if char not in punctuation_marks)
+
+    # Tokenize the query
+    tokens = word_tokenize(query.lower())
+
+    # Remove stopwords, perform normalization, and apply stemming to query terms
+    terms = [stemmer.stem(token) for token in tokens if token not in stop_words]
+
+    # Calculate relevance score for each document based on query terms
+    doc_scores = defaultdict(float)
+    for term in terms:
+        if term in inverted_index:
+            for doc_id, doc_content in inverted_index[term]:
+                doc_scores[doc_id] += 1
+
+    # Sort documents by relevance score (descending order)
+    sorted_docs = sorted(doc_scores.items(), key=lambda x: x[1], reverse=True)
+
+    # Retrieve relevant document IDs and relevance scores
+    relevant_docs = [(doc_id, score) for doc_id, score in sorted_docs]
+
+    return relevant_docs
+
+
+class RefinedQueryDialog(tk.Toplevel):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title("Refined Query")
+        self.query = None
+
+        self.lbl_message = tk.Label(self, text="Enter a refined query:")
+        self.lbl_message.pack()
+
+        self.entry_query = tk.Entry(self)
+        self.entry_query.pack()
+
+        self.btn_confirm = tk.Button(self, text="Confirm", command=self.confirm_button_click)
+        self.btn_confirm.pack()
+
+        self.entry_query.focus()
+
+    def confirm_button_click(self):
+        self.query = self.entry_query.get()
+        self.destroy()
+
+
+class SearchEngineGUI:
+    def __init__(self):
+        self.window = tk.Tk()
+        self.window.title("Search Engine")
+        self.urls = None
+        self.evaluation_metrics = EvaluationMetrics()  # Evaluation metrics object
+
+        self.lbl_urls = tk.Label(self.window, text="Web Page URLs:")
+        self.lbl_urls.pack()
+
+        self.entry_urls = tk.Entry(self.window)
+        self.entry_urls.pack()
+
+        self.btn_crawl = tk.Button(self.window, text="Crawl Web Pages", command=self.crawl_button_click)
+        self.btn_crawl.pack()
+
+        self.entry_query = tk.Entry(self.window)
+        self.entry_query.pack()
+
+        self.btn_search = tk.Button(self.window, text="Search", command=self.search_button_click)
+        self.btn_search.pack()
+
+    def crawl_button_click(self):
+        urls = self.entry_urls.get().split(',')
+        self.urls = [url.strip() for url in urls]
+        if not self.urls:
+            messagebox.showwarning("Invalid Input", "Please enter at least one URL.")
+            return
+
+        crawled_documents = crawl_web_pages(self.urls)
+        if crawled_documents:
+            messagebox.showinfo("Crawling Results", f"Crawled documents: {len(crawled_documents)}")
+        else:
+            messagebox.showinfo("Crawling Results", "No documents crawled.")
+
+    def search_button_click(self):
+        query = self.entry_query.get()
+        if not query:
+            messagebox.showwarning("Invalid Input", "Please enter a query.")
+            return
+
+        if not self.urls:
+            messagebox.showwarning("Invalid Input", "Please crawl web pages first.")
+            return
+
+        inverted_index = create_inverted_index(crawl_web_pages(self.urls))
+        relevant_documents = process_query(query, inverted_index)
+
+        if relevant_documents:
+            messagebox.showinfo("Search Results", f"Relevant documents: {relevant_documents}")
+             # Calculate evaluation metrics
+            self.evaluation_metrics.calculate_metrics(relevant_documents, relevant_documents)
+
+            # Display evaluation metrics
+            messagebox.showinfo("Evaluation Metrics", f"Precision@10: {self.evaluation_metrics.precision_at_10}\n"
+                                                       f"Recall: {self.evaluation_metrics.recall}\n"
+                                                       f"MAP: {self.evaluation_metrics.map}\n"
+                                                       f"MRR: {self.evaluation_metrics.mrr}")
+        else:
+            messagebox.showinfo("Search Results", "No relevant documents found.")
+
+    def run(self):
+        self.window.mainloop()
+
+
+if __name__ == '__main__':
+    search_engine = SearchEngineGUI()
+    search_engine.run()
